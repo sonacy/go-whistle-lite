@@ -6,19 +6,28 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"log"
 	"math/big"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	lru "github.com/hashicorp/golang-lru/v2"
+)
+
+const (
+	rootYears   = 5
+	hostYears   = 1
+	rsaBitsRoot = 4096
+	rsaBitsHost = 2048
 )
 
 var (
-	rootCert  *x509.Certificate
-	rootKey   *rsa.PrivateKey
-	certCache = map[string]tlsCertPair{}
-	mu        sync.Mutex
+	rootOnce sync.Once
+	rootKey  *rsa.PrivateKey
+	rootCert *x509.Certificate
 )
 
 type tlsCertPair struct {
@@ -26,92 +35,103 @@ type tlsCertPair struct {
 	KeyPEM  []byte
 }
 
+var certLRU *lru.Cache[string, tlsCertPair]
+
 func init() {
-	if err := loadOrCreateCA(); err != nil {
-		log.Fatalf("[mitm] CA init error: %v", err)
-	}
+	// LRU 1000 hosts ≈ 40-60 MB
+	certLRU, _ = lru.New[string, tlsCertPair](1000)
 }
 
-func loadOrCreateCA() error {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, "go-whistle-lite")
-	_ = os.MkdirAll(dir, 0700)
-
-	certPath := filepath.Join(dir, "rootCA.pem")
-	keyPath := filepath.Join(dir, "rootCA.key")
-
-	if certPEM, err := os.ReadFile(certPath); err == nil {
-		if keyPEM, err2 := os.ReadFile(keyPath); err2 == nil {
-			if cb, _ := pem.Decode(certPEM); cb != nil {
-				if kb, _ := pem.Decode(keyPEM); kb != nil {
-					if rc, err := x509.ParseCertificate(cb.Bytes); err == nil {
-						if rk, err := x509.ParsePKCS1PrivateKey(kb.Bytes); err == nil {
-							rootCert, rootKey = rc, rk
-							log.Printf("[mitm] loaded root CA %s", certPath)
-							return nil
-						}
-					}
-				}
-			}
-		}
-	}
-
-	key, _ := rsa.GenerateKey(rand.Reader, 3072)
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject: pkix.Name{
-			CommonName:   "go-whistle-lite Root CA",
-			Organization: []string{"go-whistle-lite"},
-		},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().AddDate(5, 0, 0),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		MaxPathLen:            2,
-	}
-	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	rootCert, rootKey = tmpl, key
-
-	writePem(certPath, "CERTIFICATE", der)
-	writePem(keyPath, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key))
-	log.Printf("[mitm] new root CA generated: %s (import & trust it)", certPath)
-	return nil
-}
-
-func writePem(path, typ string, der []byte) {
-	f, _ := os.Create(path)
-	defer f.Close()
-	_ = pem.Encode(f, &pem.Block{Type: typ, Bytes: der})
-}
-
+/* ----------------------------------------------------
+ *  Public entry used by mitm.go
+ * --------------------------------------------------*/
 func getHostCert(host string) (tlsCertPair, error) {
-	mu.Lock()
-	defer mu.Unlock()
+	rootOnce.Do(initRootCA)
 
-	if p, ok := certCache[host]; ok {
-		return p, nil
+	if cp, ok := certLRU.Get(host); ok {
+		return cp, nil
 	}
 
-	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	key, _ := rsa.GenerateKey(rand.Reader, rsaBitsHost)
+	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
-		DNSNames:     []string{host},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().AddDate(1, 0, 0),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		NotBefore:    time.Now().Add(-30 * time.Minute),
+		NotAfter:     time.Now().AddDate(hostYears, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{host},
 	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, rootCert, &key.PublicKey, rootKey)
 	if err != nil {
 		return tlsCertPair{}, err
 	}
 
-	pair := tlsCertPair{
-		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		KeyPEM:  pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}),
-	}
-	certCache[host] = pair
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+
+	pair := tlsCertPair{CertPEM: certPEM, KeyPEM: keyPEM}
+	certLRU.Add(host, pair)
 	return pair, nil
+}
+
+/* ----------------------------------------------------
+ *  Root CA (create once, persist $HOME/go-whistle-lite)
+ * --------------------------------------------------*/
+func initRootCA() {
+	dir := filepath.Join(os.Getenv("HOME"), "go-whistle-lite")
+	_ = os.MkdirAll(dir, 0700)
+	certPath := filepath.Join(dir, "rootCA.pem")
+	keyPath := filepath.Join(dir, "rootCA.key")
+
+	// load if exists
+	cBytes, cErr := os.ReadFile(certPath)
+	kBytes, kErr := os.ReadFile(keyPath)
+	if cErr == nil && kErr == nil {
+		block, _ := pem.Decode(cBytes)
+		rootCert, _ = x509.ParseCertificate(block.Bytes)
+		block, _ = pem.Decode(kBytes)
+		rootKey, _ = x509.ParsePKCS1PrivateKey(block.Bytes)
+		log.Printf("[mitm] loaded root CA %s", certPath)
+		return
+	}
+
+	// else generate new root
+	var err error
+	rootKey, err = rsa.GenerateKey(rand.Reader, rsaBitsRoot)
+	if err != nil {
+		log.Fatalf("generate root key: %v", err)
+	}
+
+	rootSerial, _ := rand.Int(rand.Reader, big.NewInt(1<<61))
+	rootCert = &x509.Certificate{
+		SerialNumber: rootSerial,
+		Subject: pkix.Name{
+			Organization:       []string{"go-whistle-lite"},
+			OrganizationalUnit: []string{"Proxy MITM"},
+			CommonName:         "go-whistle-lite Root CA",
+		},
+		NotBefore:  time.Now().Add(-1 * time.Hour),
+		NotAfter:   time.Now().AddDate(rootYears, 0, 0),
+		KeyUsage:   x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:       true,
+		MaxPathLen: 0,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, rootCert, rootCert, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		log.Fatalf("create root cert: %v", err)
+	}
+
+	cBytes = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	kBytes = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rootKey)})
+
+	_ = os.WriteFile(certPath, cBytes, 0600)
+	_ = os.WriteFile(keyPath, kBytes, 0600)
+	log.Printf("[mitm] generated new root CA %s", certPath)
+
+	fmt.Println("\n⚠️  Import the following RootCA into your system/ browser trust store:\n", certPath)
 }

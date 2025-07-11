@@ -2,22 +2,35 @@ package proxy
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
+	"github.com/sonacy/go-whistle-lite/internal/logx"
 	"github.com/sonacy/go-whistle-lite/mitm"
 	"github.com/sonacy/go-whistle-lite/rules"
+	"github.com/sonacy/go-whistle-lite/transport"
 )
+
+var bufPool = sync.Pool{
+	New: func() any { return make([]byte, 32<<10) }, // 32 KB
+}
+
+func copyStream(dst io.Writer, src io.Reader) (int64, error) {
+	buf := bufPool.Get().([]byte)
+	n, err := io.CopyBuffer(dst, src, buf)
+	bufPool.Put(buf)
+	return n, err
+}
 
 func HandleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
-		log.Printf("[CONNECT] %s", r.Host)
+		logx.D("[CONNECT] %s", r.Host)
 		mitm.Intercept(w, r)
 		return
 	}
-	log.Printf("[HTTP   ] %s %s", r.Method, r.URL.String())
+	logx.D("[HTTP   ] %s %s", r.Method, r.URL.String())
 	handleHTTP(w, r)
 }
 
@@ -47,7 +60,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	req, _ := http.NewRequest(r.Method, target.String(), r.Body)
 	req.Header = r.Header.Clone()
 
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := transport.Upstream.RoundTrip(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -62,9 +75,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	copyStream(w, resp.Body)
 
-	log.Printf("[resp   ] %s %d", target, resp.StatusCode)
+	logx.D("[resp   ] %s %d", target, resp.StatusCode)
 }
 
 /* ---------- helpers ---------- */

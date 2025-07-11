@@ -6,9 +6,10 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"log"
 	"os/exec"
 	"strings"
+
+	"github.com/sonacy/go-whistle-lite/internal/logx"
 )
 
 // Enable 开启系统 HTTP/HTTPS 代理
@@ -18,7 +19,7 @@ func Enable(host string, port int) error {
 		return err
 	}
 	for _, s := range svcs {
-		log.Printf("[proxyctl] enable %s %s:%d", s, host, port)
+		logx.D("[proxyctl] enable %s %s:%d", s, host, port)
 		for _, args := range [][]string{
 			{"-setwebproxy", s, host, fmt.Sprint(port)},
 			{"-setsecurewebproxy", s, host, fmt.Sprint(port)},
@@ -37,7 +38,7 @@ func Enable(host string, port int) error {
 func Disable() {
 	svcs, _ := list()
 	for _, s := range svcs {
-		log.Printf("[proxyctl] disable %s", s)
+		logx.D("[proxyctl] disable %s", s)
 		exec.Command("networksetup", "-setwebproxystate", s, "off").Run()
 		exec.Command("networksetup", "-setsecurewebproxystate", s, "off").Run()
 	}

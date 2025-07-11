@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sonacy/go-whistle-lite/internal/logx"
 	"github.com/sonacy/go-whistle-lite/proxy"
 	"github.com/sonacy/go-whistle-lite/rules"
 	"github.com/sonacy/go-whistle-lite/sysproxy"
@@ -74,9 +75,9 @@ func main() {
 	}()
 
 	/* ---- ⑤ Serve ---- */
-	log.Printf("[gw-lite] listening on %s", addr)
+	logx.D("[gw-lite] listening on %s", addr)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		log.Printf("[gw-lite] serve error: %v", err)
+		logx.D("[gw-lite] serve error: %v", err)
 	}
 	log.Println("[gw-lite] stopped")
 }
@@ -97,7 +98,7 @@ func tryListen(addr string, port int) (net.Listener, error) {
 		return nil, err
 	}
 
-	log.Printf("[gw-lite] port %d busy, trying to free …", port)
+	logx.D("[gw-lite] port %d busy, trying to free …", port)
 	if ferr := forceFreePort(port); ferr != nil {
 		return nil, fmt.Errorf("%v (port busy, free failed: %v)", err, ferr)
 	}
@@ -123,9 +124,9 @@ func forceFreePort(p int) error {
 		return fmt.Errorf("no process found")
 	}
 	for _, pid := range pids {
-		log.Printf("[gw-lite] kill -9 %d", pid)
+		logx.D("[gw-lite] kill -9 %d", pid)
 		if kerr := syscall.Kill(pid, syscall.SIGKILL); kerr != nil {
-			log.Printf("kill %d: %v", pid, kerr)
+			logx.D("kill %d: %v", pid, kerr)
 		}
 	}
 	return nil

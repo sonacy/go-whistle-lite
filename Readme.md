@@ -31,7 +31,7 @@ sudo go run main.go -port 8899
 [gw-lite] listening on :8899
 ```
 
-1. First run generates `~/.go-whistle-lite/rootCA.pem`
+1. First run generates `~/go-whistle-lite/rootCA.pem`
 2. **Import & Always Trust** this root cert in Keychain / Windows cert store
 3. Browser/system proxy ⇒ `127.0.0.1:8899` (HTTP + HTTPS)
 4. Edit **rules/rules.txt** – save – immediately takes effect ✨

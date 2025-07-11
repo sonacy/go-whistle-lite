@@ -3,7 +3,6 @@ package rules
 import (
 	"bufio"
 	"encoding/json"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sonacy/go-whistle-lite/internal/logx"
 )
 
 /* ---------- action constants ---------- */
@@ -106,14 +107,14 @@ func load() {
 
 	rs, err := parseDSL(txtFile)
 	if err != nil {
-		log.Printf("[rules] parse error: %v", err)
+		logx.D("[rules] parse error: %v", err)
 		return
 	}
 
 	mu.Lock()
 	list, mt = rs, fi.ModTime()
 	mu.Unlock()
-	log.Printf("[rules] %d rule(s) loaded", len(rs))
+	logx.D("[rules] %d rule(s) loaded", len(rs))
 }
 
 func parseDSL(p string) ([]*Rule, error) {
@@ -212,7 +213,7 @@ func loadLegacy() {
 	mu.Lock()
 	list = rs
 	mu.Unlock()
-	log.Printf("[rules] %d legacy JSON rule(s) loaded", len(rs))
+	logx.D("[rules] %d legacy JSON rule(s) loaded", len(rs))
 }
 
 /* ---------- helpers for status / header rules ---------- */

@@ -6,18 +6,31 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	http2 "golang.org/x/net/http2"
 
+	"github.com/sonacy/go-whistle-lite/internal/logx"
 	"github.com/sonacy/go-whistle-lite/rules"
+	"github.com/sonacy/go-whistle-lite/transport"
 )
+
+var bufPool = sync.Pool{
+	New: func() any { return make([]byte, 32<<10) }, // 32 KB
+}
+
+func copyStream(dst io.Writer, src io.Reader) (int64, error) {
+	buf := bufPool.Get().([]byte)
+	n, err := io.CopyBuffer(dst, src, buf)
+	bufPool.Put(buf)
+	return n, err
+}
 
 /* ------------ CONNECT entry ------------ */
 
@@ -35,7 +48,7 @@ func Intercept(w http.ResponseWriter, r *http.Request) {
 	host := extractHost(r.Host)
 	pair, err := getHostCert(host)
 	if err != nil {
-		log.Printf("cert: %v", err)
+		logx.D("cert: %v", err)
 		cliRaw.Close()
 		return
 	}
@@ -46,7 +59,7 @@ func Intercept(w http.ResponseWriter, r *http.Request) {
 		NextProtos:   []string{"h2", "http/1.1"},
 	})
 	if err := cli.Handshake(); err != nil {
-		log.Printf("TLS handshake: %v", err)
+		logx.D("TLS handshake: %v", err)
 		cli.Close()
 		return
 	}
@@ -60,7 +73,7 @@ func Intercept(w http.ResponseWriter, r *http.Request) {
 	/* 3. HTTP/1.x path */
 	up, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", r.Host, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
-		log.Printf("dial up: %v", err)
+		logx.D("dial up: %v", err)
 		cli.Close()
 		return
 	}
@@ -109,7 +122,7 @@ func h2Handler(w http.ResponseWriter, r *http.Request) {
 	out, _ := http.NewRequest(r.Method, dst.String(), r.Body)
 	out.Header = r.Header.Clone()
 
-	resp, err := http.DefaultTransport.RoundTrip(out)
+	resp, err := transport.Upstream.RoundTrip(out)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		fmt.Fprint(w, err.Error())
@@ -125,7 +138,7 @@ func h2Handler(w http.ResponseWriter, r *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	copyStream(w, resp.Body)
 }
 
 /* ------------ HTTP/1.x downstream ------------ */
@@ -138,7 +151,7 @@ func pipeHTTP1(cli, up net.Conn) {
 		req, err := http.ReadRequest(rd)
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("read: %v", err)
+				logx.D("read: %v", err)
 			}
 			return
 		}
@@ -164,9 +177,9 @@ func pipeHTTP1(cli, up net.Conn) {
 		out, _ := http.NewRequest(req.Method, dst.String(), req.Body)
 		out.Header = req.Header.Clone()
 
-		resp, err := http.DefaultTransport.RoundTrip(out)
+		resp, err := transport.Upstream.RoundTrip(out)
 		if err != nil {
-			log.Printf("rt: %v", err)
+			logx.D("rt: %v", err)
 			return
 		}
 
