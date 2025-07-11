@@ -1,0 +1,7 @@
+[
+  {
+    "match": "https://www.tiktok.com/",
+    "action": "mapRemote",
+    "target": "http://localhost:8080"
+  }
+]

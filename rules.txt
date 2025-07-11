@@ -1,0 +1,4 @@
+# 把全部 www.tiktok.com 流量转到本地 8080
+www.tiktok.com/list         mapRemote://http://localhost:8080
+www.tiktok.com/          mapRemote://http://localhost:8080
+www.tiktok.com/static*   mapRemote://http://localhost:8080/static
